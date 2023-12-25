@@ -1,0 +1,247 @@
+---
+title: "University Admission Analysis and Prediction"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+# Dataset
+
+The dataset used for this project is obtained from [*kaggle*](https://www.kaggle.com/datasets/mohansacharya/graduate-admissions/data).  It contains 7 variables which are considered important for being admitted into University Master's programme.
+
+## Load dataset
+
+```{r}
+library(glmnet) # install.packages("glmnet")
+library(caret) # install.packages("caret")
+admissions <- read.csv("Admission_Predict_Ver1.1.csv", header=TRUE)
+admissions <- admissions[c(-1)]
+head(admissions)
+cat("Dimension of dataset:", dim(admissions))
+```
+
+
+```{r}
+x <- summary(admissions)
+x
+par(mfrow=c(2, 3))
+boxplot(admissions$GRE.Score, xlab = "GRE.Score")
+boxplot(admissions$TOEFL.Score, xlab = "TOEFL.Score")
+boxplot(admissions$University.Rating, xlab = "University.Rating")
+boxplot(admissions$SOP, xlab = "SOP")
+boxplot(admissions$LOR , xlab = "LOR")
+boxplot(admissions$CGPA, xlab = "CGPA")
+```
+
+
+# Data Preprocessing
+
+## Remove null values
+
+```{r}
+admissions <- na.omit(admissions)
+```
+
+## Remove outliers
+
+```{r}
+# Define the function to identify outliers
+identify_outliers <- function(x) {
+  iqr15 <- IQR(x) * 1.5
+  q75 <- quantile(x, 0.75)
+  q25 <- quantile(x, 0.25)
+  c1 <- q25 - iqr15
+  c3 <- q75 + iqr15
+  return(x < c1 | x > c3)
+}
+
+selected_columns <- c('GRE.Score', 'TOEFL.Score', 'University.Rating', 'SOP', 'LOR', 'CGPA', 'Research')
+outlier_indices <- sapply(admissions[selected_columns], identify_outliers)
+
+rows_to_remove <- apply(outlier_indices, 1, any)
+admissions <- admissions[!rows_to_remove, ]
+```
+
+## Split the dataset into train and test data
+
+```{r}
+set.seed(42)
+n <- nrow(admissions)
+
+train_indices <- sample(1:n, size = 0.7*n)
+train_set <- admissions[train_indices, ]
+test_set <- admissions[-train_indices, ]
+```
+
+## Define $\mathbf{X}$, $y$
+
+```{r}
+trainX <- train_set[c(1:7)]
+trainY <- unlist(train_set[c(8)])
+testX <- test_set[c(1:7)]
+testY <- unlist(test_set[c(8)])
+```
+
+## Define evaluation function
+
+```{r}
+evaluate <- function(model, predY){
+  mse <- mean((predY - testY)^2)
+  rmse <- sqrt(mse)
+  r2 <- cor(testY, predY)^2
+  
+  n <- length(testY)
+  p <- length(coef(model, s=0)) - 1
+  adjusted_r2 <- 1 - (1 - r2) * ((n - 1) / (n - p - 1))
+  
+  cat("Root Mean Squared Error (RMSE):", rmse, "\n")
+  cat("Adjusted R-Squared:", adjusted_r2, "\n")
+  return (list(rmse=rmse, adjusted_r2=adjusted_r2))
+}
+```
+
+# Modelling
+## Multiple Linear Regression Model
+
+```{r}
+lm1 <- lm(trainY ~ ., data=trainX)
+summary(lm1)
+```
+
+```{r}
+par(mfrow=c(2,2))
+plot(lm1)
+```
+
+```{r}
+lm1.predY <- predict(lm1, newdata=testX)
+Y <- cbind(lm1.predY, testY)
+head(as.data.frame(Y)) # display a dataframe with predicted values and true values
+
+plot(lm1.predY, testY, xlab = "Predicted", ylab = "Observed", main = "Multiple Linear Regression")
+lines(lowess(lm1.predY, testY), col = "red")
+
+library(car)
+avPlots(lm1)
+```
+
+```{r}
+lm1.results <- evaluate(lm1, lm1.predY)
+lm1.rmse <- lm1.results$rmse
+lm1.adjusted_r2 <- lm1.results$adjusted_r2
+```
+
+Now, create another model with significant variables only.
+
+```{r}
+lm2 <- lm(trainY ~ GRE.Score + TOEFL.Score + LOR + CGPA + Research, data=trainX)
+summary(lm2)$adj.r.squared
+```
+
+```{r}
+anova(lm1, lm2)
+```
+
+```{r}
+anova(lm1, lm2)$Pr[2] # p-value > 0.05 => lm1 is not rejected
+```
+
+The $p$-value is high, which suggests `lm1` may be better than `lm2`
+
+## Ridge Regression
+
+$$
+\min_\beta \frac{1}{2} \lVert \mathbf{y} - \mathbf{X \beta}\rVert_2^2 + \frac{\lambda}{2} \lVert \mathbf{\beta} \rVert_2^2
+$$
+
+```{r}
+trainX <- as.matrix(trainX)
+rr.cv <- cv.glmnet(trainX, trainY, alpha=0)
+plot(rr.cv)
+```
+
+```{r}
+rr.bestlambda <- rr.cv$lambda.min
+rr.bestlambda
+```
+
+```{r}
+rr <- glmnet(trainX, trainY, alpha=0, lambda=rr.bestlambda)
+coef(rr)
+```
+
+
+```{r}
+rr.predY <- predict(rr, s=rr.bestlambda, newx=as.matrix(testX))
+rr.results <- evaluate(rr, rr.predY)
+rr.rmse <- rr.results$rmse
+rr.adjusted_r2 <- rr.results$adjusted_r2[1, 1]
+```
+
+## LASSO Regression
+
+$$
+\min_\beta \frac{1}{2} \lVert \mathbf{y} - \mathbf{X \beta}\rVert_2^2 + \lambda \lVert \mathbf{\beta} \rVert_1
+$$
+
+```{r}
+lasso.cv <- cv.glmnet(trainX, trainY, alpha=1)
+plot(lasso.cv)
+```
+
+```{r}
+lasso.bestlambda <- lasso.cv$lambda.min
+lasso.bestlambda
+```
+
+```{r}
+lasso <- glmnet(trainX, trainY, alpha=1, lambda=lasso.bestlambda)
+coef(lasso)
+```
+
+The coefficients show that the most variables have been shrunk to approximately zero.
+
+```{r}
+lasso.predY <- predict(lasso, s=lasso.bestlambda, newx=as.matrix(testX))
+lasso.results <- evaluate(lasso, lasso.predY)
+lasso.rmse <- lasso.results$rmse
+lasso.adjusted_r2 <- lasso.results$adjusted_r2[1, 1]
+```
+
+---
+
+# Results and Comparison
+
+```{r}
+results_df <- data.frame(Model = character(), RMSE = numeric(), R2 = numeric(),
+                         stringsAsFactors = FALSE)
+
+results_df <- rbind(
+  results_df,
+  data.frame(Model = "Multiple Linear Regression", RMSE = lm1.rmse, R2 = lm1.adjusted_r2),
+  data.frame(Model = "Ridge Regression", RMSE = rr.rmse, R2 = rr.adjusted_r2),
+  data.frame(Model = "LASSO Regression", RMSE = lasso.rmse, R2 = lasso.adjusted_r2)
+)
+
+results_df
+```
+
+```{r}
+best_model_row <- results_df[which.min(results_df$RMSE), ]
+
+best_model <- best_model_row$Model
+best_rmse <- best_model_row$RMSE
+best_r2 <- best_model_row$R2
+
+# Print the best model and its metrics
+cat("Best Model:", best_model, "\n")
+cat("RMSE:", best_rmse, "\n")
+cat("R-squared:", best_r2, "\n")
+```
+
+After analyzing the performance of three models (Multiple Linear Regression, Ridge Regression, and LASSO Regression), it was found that **Ridge Regression** has the least **Root Mean Squared Error (RMSE)** and the highest **R-squared** value.  Therefore, it can be concluded that **Ridge Regression** is the preferred model for University Admission Prediction.
+
+
+
+
